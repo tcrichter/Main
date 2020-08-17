@@ -1,0 +1,523 @@
+---
+title: "Bias Dataset Creation, Analysis, & Visualization"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# load necessary libraries
+library(boot)        # inv.logit()
+library(ggplot2)     # ggplot()
+library(utils)       # expand.grid()
+library(Rfast)       # colMinsMaxs()
+```
+
+
+```{r}
+########################################################
+
+# CREATE THE DATA
+
+########################################################
+
+# constants for data and looping
+  num_combos <- 216  # all possible combinations of the parameters we will set below
+  num_sims <- 1      # number of simulations (use later)
+  num_measures <- 23 # measures of interest beyond parameter settings (6 cols) & indices (2 cols)
+  n <- 10^5          # samples size
+  trials <- 1        # data generated treated as 1 trial per observation
+  start_row <-1      # desired starting row from the dataset of parameters created
+
+# df for chosen parameter values for variable relationships
+  df_parameters <- expand.grid(
+   "lnOR(X_Y)"=c(2),              # True effect of X on Y | log OR     | 1 constant  
+   "lnOR(C_Y)"=c(0.5, 1, 2),      # True effect of C on Y | log OR     | 3 different
+   "lnOR(C_X)"=c(0.5, 1, 2),      # True effect of C on X | log OR     | 3 different
+   "lnPrev(C)"=c(0.1, 0.2, 0.5),  # True Prevalence of C  | log OR     | 3 different
+   "se"=c(0.7, 0.9),              # sensitivity           | Proportion | 2 different
+   "sp"=c(0.8, 0.9),              # specificity           | Proportion | 2 different
+   "intercept"=c(-3, -2)          # baseline odds         | log Odds   | 2 different
+  )
+
+      # you can check math on this, 3 vars with 3 values & 3 vars with 2 values
+      # nCr; 3C*3C*3C*2C*2C*2C = [(3C)^3 * (2C)^3] = 216
+      dim(df_parameters)
+      unique(df_parameters)
+      # sorting by column index not necessary - a row index is used later so settings will match output
+        # naming columns already ocurred in expand.grid(), rename for reading post loop
+        # no need to write.csv, can always be reproduced exactly with code above
+```
+
+
+```{r}
+########################################################
+
+# CONVERT TO MATRIX
+
+########################################################
+
+# won't matter for speed if r references values from df but...
+# r is faster INSERTING values into matrix vs df in a loop
+mat_combos <- as.matrix(sapply(df_parameters, as.numeric)) 
+
+  # column bind NA columns for eventual replacement of effect measures within the loop
+  add_columns <- matrix(NA, ncol = num_measures, nrow = num_combos)
+  mat_combos <- cbind(mat_combos, add_columns)
+  
+  # add index for checking will become last column
+  add_index <- matrix(1:num_combos, ncol = 1, nrow = num_combos)
+  mat_combos <- cbind(mat_combos, add_index)
+
+    # confirm
+    length(mat_combos)
+    class(mat_combos)
+    dim(mat_combos) # should be (num_combos)X(num_measures + parameter settings + indices)
+    # view(mat_combos)
+```
+
+```{r}
+########################################################
+
+# NOTES BEFORE LOOP
+
+########################################################
+
+# 1) the code coef(model) is used to assign values from the coefficient table
+#    instead of using $coefficients[2,1] because if this underlying
+#    code changed, we would not immediately recgnize what [2,1] is.
+#    reference at stackoverflow.com/questions/17824461/
+
+# 2) if you want to test a specific row of parameters, simply set
+#    "start_row" to the row number in df_parameters you want to start at
+#    and then the row you want to finish as "num_combos", before the loop e.g.
+
+#      start_row <- 3
+#      num_combows <- 4
+
+#    will start the loop at row 3 from df_parameters and run 4 rows total
+#    i.e. 3,4,5,6 all will all be run
+```
+
+
+```{r}
+########################################################
+
+# FUNCTION / LOOP
+
+########################################################
+
+for (row in start_row:num_combos) { # this loop will run through all rows and record analysis alongside respective parameters 
+    
+  set.seed(111)  # include set.seed() inside loop or the results won't be reproducible
+  
+  # confounder variable 
+  C = rbinom(n, trials, df_parameters[row, "lnPrev(C)"])
+  # exposure variable
+  X = rbinom(n, trials, inv.logit(df_parameters[row, "intercept"] + df_parameters[row, "lnOR(C_X)"]*C))
+  # outcome variable
+  Y = rbinom(n, trials, inv.logit(df_parameters[row, "intercept"] + df_parameters[row, "lnOR(C_Y)"]*C + df_parameters[row, "lnOR(X_Y)"]*X))
+  
+  # Notice that X is a vector such that X = [0,1,1,0,....] etc
+  # we want to multiply these values by a value of se and 1-sp
+  # we create a vector such that p = [1-sp, se, se, 1-sp,....] etc
+  
+  # must do this otherwise r interprets 0 weird
+  p = as.character(X) # viewing will show 0.1 but sum(p==0.1) = 0
+                       
+  p[X == "1"] = df_parameters[row, "se"]
+  p[X == "0"] = 1-df_parameters[row, "sp"]
+  p = as.numeric(p)
+  
+  # misclassification variable, X*=S for coding ease
+  S = rbinom(n, trials, p)
+
+      dset = data.frame(X, C, Y, S) # for the regression models
+
+  # calculate and save effect measures 
+  # if want full reg tables tidy, devtools, and install_github("dgrtwo/broom") will be more elegant
+  
+  # Estimate 1) True Effect, X -> Y : Unadjusted misclassification | Adjusted confounding 
+    B1_XY_MC.DNE_C.adj = coef(summary(glm(Y~X+C, data = dset,
+                                        family=binomial(link=logit))))["X","Estimate"]
+       
+    
+  # Estimate 2) Observed Effect, X* -> Y : Unadjusted misclassification | Unadjusted confounding 
+    B2_SY_MC.unadj_C.unadj = coef(summary(glm(Y~S, data = dset,
+                                               family=binomial(link=logit))))["S", "Estimate"]
+      
+    
+  # Estimate 3) Observed Effect, X* -> Y : Adjusted misclassification | Unadjusted confounding
+        a_temp = as.numeric(sum(dset$S==1 & dset$Y==1))
+        b_temp = as.numeric(sum(dset$S==1 & dset$Y==0))
+        c_temp = as.numeric(sum(dset$S==0 & dset$Y==1))
+        d_temp = as.numeric(sum(dset$S==0 & dset$Y==0))
+        N1 = as.numeric(a_temp+c_temp)
+        N0 = as.numeric(b_temp+d_temp)
+        
+        # unadjusted should be the same lnOR as B2
+        #B2.1_SY_MC.unadj_C.unadj=log(((a_temp/b_temp))/((c_temp/d_temp)))
+        
+        #create 2x2 of observed cells (exposure misclassification is adjusted)
+        A_temp = as.numeric((a_temp-(1-df_parameters[row, "sp"])*N1)/(df_parameters[row, "se"]+df_parameters[row, "sp"]-1))
+        B_temp = as.numeric((b_temp-(1-df_parameters[row, "sp"])*N0)/(df_parameters[row, "se"]+df_parameters[row, "sp"]-1))
+        C_temp = as.numeric(N1-A_temp)
+        D_temp = as.numeric(N0-B_temp)
+    
+    B3_SY_MC.adj_C.unadj = as.numeric(log(((A_temp/B_temp))/((C_temp/D_temp))))
+        
+  # Estimate 4) Observed Effect, X* -> Y : Unadjusted misclassification | Adjusted confounding 
+    B4_SY_MC.unadj_C.adj = coef(summary(glm(Y~S+C, data = dset, 
+                                             family=binomial(link=logit))))["S", "Estimate"]
+
+  # Bias factor due to Confounding using (Estimate 4)-(Estimate 2, unadjusted) = (no C, MC)-(C, MC)
+    BF_C_with.MC = B4_SY_MC.unadj_C.adj-B2_SY_MC.unadj_C.unadj
+    
+  # Estimate 5) Adjusted misclassification | Adjusted confounding 
+    EstXY_adj_MC.and.C = BF_C_with.MC + B3_SY_MC.adj_C.unadj
+    
+  # Bias factor using (Bias Factor)+(Estimate 2, adjusted) = (C, no MC)-(no C, no MC)
+    BF_C_without.MC = EstXY_adj_MC.and.C-B3_SY_MC.adj_C.unadj 
+    
+  # Difference bewtween Truth and Estimates
+    TrueXY_vs_EstXY_adj_MC.and.C = abs(EstXY_adj_MC.and.C-df_parameters[row, "lnOR(X_Y)"])
+    
+  # by-hand OR based on RR (eq' 2) from Schlesselman paper "Assessing Effects of Counfinding Variables," 1978
+  
+      # OR and lnOR due to X in the absence of C; adjusted for confounding
+          Odds_X1_absenceC <- sum(dset$Y==1 & dset$X==1 & dset$C==0)/
+                              sum(dset$Y==0 & dset$X==1 & dset$C==0)
+    
+          Odds_X0_absenceC <- sum(dset$Y==1 & dset$X==0 & dset$C==0)/
+                              sum(dset$Y==0 & dset$X==0 & dset$C==0)
+  
+        OR_dueX_absenceC <- Odds_X1_absenceC/Odds_X0_absenceC
+        lnOR_dueX_absenceC <- log(OR_dueX_absenceC)
+          
+          # using p and 1-p i.e. the logit
+        #   numer_1 <- sum(dset$Y==1 & dset$X==1 & dset$C==0)/sum(dset$X==1 & dset$C==0) # p
+        #   denom_1 <- 1-numer_1 # 1-p
+        #   odds_1  <- numer_1/denom_1 # p/(1-p)
+        #   
+        #   numer_2 <- sum(dset$Y==1 & dset$X==0 & dset$C==0)/sum(dset$X==0 & dset$C==0)
+        #   denom_2 <- 1-numer_2
+        #   odds_2  <- numer_2/denom_2
+        #   
+        #   
+        # OR_dueX_absenceC <- odds_1/odds_2
+        
+      # OR due to C in the presence of X
+          Odds_C1_presenceX <- sum(dset$Y==1 & dset$C==1 & dset$X==1)/
+                                 sum(dset$Y==0 & dset$C==1 & dset$X==1)
+    
+          Odds_C0_presenceX <- sum(dset$Y==1 & dset$C==0 & dset$X==1)/
+                                 sum(dset$Y==0 & dset$C==0 & dset$X==1)
+  
+        OR_dueC_presenceX <- Odds_C1_presenceX/Odds_C0_presenceX
+          
+          # numer_3 <- sum(dset$Y==1 & dset$C==1 & dset$X==1)/sum(dset$C==1 & dset$X==1) # p
+          # denom_3 <- 1-numer_3 # 1-p
+          # odds_3  <- numer_3/denom_3 # p/(1-p)
+          #                       
+          # numer_4 <- sum(dset$Y==1 & dset$C==0 & dset$X==1)/sum(dset$C==0 & dset$X==1)
+          # denom_4 <- 1-numer_4
+          # odds_4  <- numer_4/denom_4
+          #                    
+          # OR_dueC_presenceX <- odds_3/odds_4
+          
+      # OR due to C in the absence of X
+          Odds_C1_absenceX <- sum(dset$Y==1 & dset$C==1 & dset$X==0)/
+                              sum(dset$Y==0 & dset$C==1 & dset$X==0)
+          
+          Odds_C0_absenceX <- sum(dset$Y==1 & dset$C==0 & dset$X==0)/
+                              sum(dset$Y==0 & dset$C==0 & dset$X==0)
+          
+        OR_dueC_absenceX <- Odds_C1_absenceX/Odds_C0_absenceX
+          
+          # numer_5 <- sum(dset$Y==1 & dset$C==1 & dset$X==0)/sum(dset$C==1 & dset$X==0)
+          # denom_5 <- 1-numer_5
+          # odds_5  <- numer_5/denom_5
+          # 
+          # numer_6 <- sum(dset$Y==1 & dset$C==0 & dset$X==0)/sum(dset$C==0 & dset$X==0)
+          # denom_6 <- 1-numer_6
+          # odds_6  <- numer_6/denom_6
+          # 
+          # OR_dueC_absenceX <- odds_5/odds_6
+          
+      # among individuals exposed to X, the proportion and odds in whom C is present
+        prop1 <- sum(dset$X==1 & dset$C==1)/sum(dset$X==1)
+        odds1 <- sum(dset$X==1 & dset$C==1)/sum(dset$X==1 & dset$C==0)
+        
+      # among individuals not exposed to X, the proportion in whom C is present
+        prop2 <- sum(dset$X==0 & dset$C==1)/sum(dset$X==0)
+        odds2 <- sum(dset$X==0 & dset$C==1)/sum(dset$X==0 & dset$C==0)
+        
+      # among individuals exposed to X, the proportion and odds in whom C is NOT present
+        prop1_inv <- 1-prop1
+        odds1_inv <- sum(dset$X==1 & dset$C==0)/sum(dset$X==1 & dset$C==1)
+        
+      # among individuals not exposed to X, the proportion in whom C is present
+        prop2_inv <- 1-prop2
+        odds2_inv <- sum(dset$X==0 & dset$C==0)/sum(dset$X==0 & dset$C==1)
+        
+    # spurious effect of C on apparent OR for X using proportions
+        numer_spur_prop <- OR_dueC_presenceX*prop1 + prop1_inv
+        denom_spur_prop <- OR_dueC_absenceX*prop2 + prop2_inv
+      
+      SpurEffect_prop <- numer_spur_prop/denom_spur_prop
+      lnSpurEffect_prop <- log(SpurEffect_prop)
+      
+        numer_spur_odds <- OR_dueC_presenceX*odds1 + odds1_inv
+        denom_spur_odds <- OR_dueC_absenceX*odds2 + odds2_inv
+      
+      SpurEffect_odds <- numer_spur_odds/denom_spur_odds
+      lnSpurEffect_odds <- log(SpurEffect_odds)
+    
+    # log OR with confounding bias according to Schlesselman, 1978
+    lnOR_schles_bias_prop <- log(OR_dueX_absenceC*SpurEffect_prop)
+    lnOR_schles_bias_odds <- log(OR_dueX_absenceC*SpurEffect_odds)
+    
+  # check that lnOR(C->X) = lnOR(X->C) ; should be since ORs are matematically equivalent
+  # check against original parameter settings in results i.e. "lnOR(C_X)"=c(0.5, 1, 2),
+        a_temp2 = as.numeric(sum(dset$X==1 & dset$C==1))
+        b_temp2 = as.numeric(sum(dset$X==1 & dset$C==0))
+        c_temp2 = as.numeric(sum(dset$X==0 & dset$C==1))
+        d_temp2 = as.numeric(sum(dset$X==0 & dset$C==0))
+        
+    lnOR_XC <- log((a_temp2/b_temp2)/(c_temp2/d_temp2))
+        
+        a_temp3 = as.numeric(sum(dset$C==1 & dset$X==1))
+        b_temp3 = as.numeric(sum(dset$C==1 & dset$X==0))
+        c_temp3 = as.numeric(sum(dset$C==0 & dset$X==1))
+        d_temp3 = as.numeric(sum(dset$C==0 & dset$X==0))
+    
+    lnOR_CX <- log((a_temp3/b_temp3)/(c_temp3/d_temp3))
+    
+  # compare log odds of confounder (C) among exposure (X) and misclassified exposure (S)
+      Odds_C_in_X <- sum(dset$X==1 & dset$C==1)/sum(dset$X==0 & C==1)
+      Odds_C_in_S <- sum(dset$S==1 & dset$C==1)/sum(dset$S==0 & C==1)
+      Odds_C_in_Y <- sum(dset$Y==1 & dset$C==1)/sum(dset$Y==0 & C==1)
+      
+    lnOdds_C_in_X <- log(Odds_C_in_X)
+    lnOdds_C_in_S <- log(Odds_C_in_S)
+    lnOdds_C_in_Y <- log(Odds_C_in_Y)
+
+      # add values to resepctive locations in final matrix
+      mat_combos[row, 8] <- B1_XY_MC.DNE_C.adj
+      mat_combos[row, 9] <- B2_SY_MC.unadj_C.unadj
+      mat_combos[row,10] <- B3_SY_MC.adj_C.unadj
+      mat_combos[row,11] <- B4_SY_MC.unadj_C.adj
+      mat_combos[row,12] <- BF_C_with.MC
+      mat_combos[row,13] <- BF_C_without.MC
+      mat_combos[row,14] <- EstXY_adj_MC.and.C
+      mat_combos[row,15] <- df_parameters[row, "lnOR(X_Y)"]
+      mat_combos[row,16] <- TrueXY_vs_EstXY_adj_MC.and.C
+      mat_combos[row,17] <- lnOdds_C_in_X
+      mat_combos[row,18] <- lnOdds_C_in_S
+      mat_combos[row,19] <- lnOdds_C_in_Y
+      mat_combos[row,20] <- lnOR_XC
+      mat_combos[row,21] <- lnOR_CX
+      mat_combos[row,22] <- SpurEffect_prop
+      mat_combos[row,23] <- lnSpurEffect_prop
+      mat_combos[row,24] <- SpurEffect_odds
+      mat_combos[row,25] <- lnSpurEffect_odds
+      mat_combos[row,26] <- lnOR_schles_bias_prop
+      mat_combos[row,27] <- lnOR_schles_bias_odds
+      mat_combos[row,28] <- OR_dueX_absenceC
+      mat_combos[row,29] <- lnOR_dueX_absenceC
+      mat_combos[row,30] <- as.numeric(row) # (QC) tracks row each loop - should match INDEX
+      # row 31 will be the INDEX from earlier
+    
+  }
+  
+```
+
+```{r}
+########################################################
+
+# VIEW AND CONFIRM DESIRED OUTPUT
+
+########################################################
+
+# label columns of matrices for easier reading
+colnames(mat_combos) <- c(
+                         "lnOR(X->Y)",
+                         "lnOR(C->Y)",
+                         "lnOR(C->X)",
+                         "lnPrev(C)",
+                         "sensitivity", # column 5
+                         "specificity",
+                         "intercept",
+                         "B1 X->Y | MC.DNE_C.adj",
+                         "B2 X*->Y | MC.unadj_C.unadj",
+                         "B3 X*->Y | MC.adj_C.unadj", # column 10
+                         "B4 X*->Y | MC.unadj_C.adj",
+                         "BiasFactor (confonding) | with MC",
+                         "BiasFactor (confounding) | without MC",
+                         "Est. of True X->Y | MC.adj_C.adj",
+                         "Truth, lnOR(X->Y)", # column 15
+                         "True X->Y vs Est X->Y | adj_MC.C",
+                         "Log Odds(C) among X",
+                         "Log Odds(C) among X*",
+                         "Log Odds(C) among Y",
+                         "lnOR(X->C) by hand", # column 20
+                         "lnOR(C->X) by hand",
+                         "Confouding Bias - Schles proportion",
+                         "log Confouding Bias - Schles proportion",
+                         "Confouding Bias - Schles odds",
+                         "log Confouding Bias - Schles odds", # column 25
+                         "lnOR with Bias - Schles proportion",
+                         "lnOR with Bias - Schles odds",
+                         "OR w/o Bias - Schles",
+                         "lnOR w/o Bias - Schles",
+                         "row #", # column 30
+                         "INDEX" 
+                         )
+dim(mat_combos)
+length(mat_combos)
+View(mat_combos)
+```
+
+```{r}
+write.csv(mat_combos, "C:/Users/tyler/OneDrive/PhD, Epi/2_Spring 2020/PUBH 7391 Quantitative Bias Analysis/Code/Simulations/Schlesselman_OR/Schlesselman_OR_3.csv")
+```
+
+
+```{r}
+########################################################
+
+# FIND MIN AND MAX VALUES & CHECK ODDS
+
+########################################################
+
+# these numbers make sense?
+
+# use print() so no nead to create object but still see label
+print("True X->Y vs Est X->Y | adj_MC.C") 
+colMinsMaxs(mat_combos[,"True X->Y vs Est X->Y | adj_MC.C"])
+
+print("OR w/o Bias - Schles")
+colMinsMaxs(mat_combos[,"OR w/o Bias - Schles"])
+
+print("lnOR w/o Bias - Schles")
+colMinsMaxs(mat_combos[,"lnOR w/o Bias - Schles"])
+
+print("B1 X->Y | MC.DNE_C.adj")
+colMinsMaxs(mat_combos[,"B1 X->Y | MC.DNE_C.adj"])
+
+print("log Confouding Bias - Schles proportion")
+colMinsMaxs(mat_combos[,"log Confouding Bias - Schles proportion"])
+
+print("log Confouding Bias - Schles odds")
+colMinsMaxs(mat_combos[,"log Confouding Bias - Schles odds"])
+
+print("BiasFactor (confounding) | without MC")
+colMinsMaxs(mat_combos[,"BiasFactor (confounding) | without MC"])
+
+print("Log Odds(C) among X")
+colMinsMaxs(mat_combos[,"Log Odds(C) among X"])
+
+print("Log Odds(C) among X*")
+colMinsMaxs(mat_combos[,"Log Odds(C) among X*"])
+
+print("Log Odds(C) among Y")
+colMinsMaxs(mat_combos[,"Log Odds(C) among Y"])
+
+
+```
+
+```{r}
+# convert to df for ggplot
+df_to_plot <- as.data.frame(mat_combos)
+
+# rename variables for ggplot ease
+colnames(df_to_plot) <- c(
+                         "lnOR_X_Y",
+                         "lnOR_C_Y",
+                         "lnOR_C_X",
+                         "lnPrev_C",
+                         "se", # column 5
+                         "sp",
+                         "intercept",
+                         "B1_X_Y_MC.DNE_C.adj",
+                         "B2_S_Y_MC.unadj_C.unadj",
+                         "B3_S_Y_MC.adj_C.unadj", # column 10
+                         "B4_S_Y_MC.unadj_C.adj",
+                         "BiasFactor_with_MC",
+                         "BiasFactor_without_MC",
+                         "Est.of.True_X_Y_MC.adj_C.adj",
+                         "Truth_lnOR_X_Y", # column 15
+                         "True_X_Y.vs.Est_X_Y_adj_MC.C",
+                         "LogOdds_C_amongX",
+                         "LogOdds_C_amongS",
+                         "LogOdds_C_amongY",
+                         "lnOR_X_C_byhand", # column 20
+                         "lnOR_C_X_byhand",
+                         "ConfoudingBias_Schles_proportion",
+                         "lnConfoudingBias_Schles_proportion",
+                         "ConfoudingBias_Schles_odds",
+                         "lnConfoudingBias_Schles_odds", # column 25
+                         "lnOR_withBias_Schles_prop",
+                         "lnOR_withBias_Schles_odds",
+                         "OR_without_Bias_Schles",
+                         "lnOR_without_Bias_Schles",
+                         "row#", # column 30
+                         "INDEX" 
+                         )
+```
+
+```{r}
+y_axis <- df_to_plot[, "B1_X_Y_MC.DNE_C.adj"]
+x_axis <- df_to_plot[, "lnOR_without_Bias_Schles"]
+
+# plot structure
+p <- ggplot(data = df_to_plot, aes(y=y_axis, # y-axis
+                                   x=x_axis, # x-axis
+                                   colour=paste(lnOR_C_X))) +
+  scale_color_manual(breaks = c("0.5", "1", "2"), values=c("red", "blue", "green")) +
+  geom_point() +
+  geom_hline(yintercept = 2, linetype="dashed", color = "black") +
+  geom_vline(xintercept = 2, linetype="dotted", color = "purple") +
+  # geom_text(label=rownames(df_to_plot)) +
+  scale_y_continuous() # use for auto-scaling
+  scale_x_continuous() # use for auto-scaling
+  # scale_y_continuous(breaks = seq(1.98, 2.005, by = 0.002)) 
+  # scale_x_continuous(breaks = seq(1.98, 2.005, by = 0.002))
+
+  # faceting and displaying the plot
+  p + facet_grid(lnOR_C_Y  ~ sensitivity + specificity + intercept, labeller = label_both) +
+    labs(
+      title = "lnOR after C. adjusted, MC=DNE vs Schlesselman's lnOR after C. adjusted",
+      # subtitle = "",
+      caption = "~ x and y-axis values are on log-scale
+~ dashed and dotted line is True X->Y",
+      x = "lnOR after adj. C - Schles (MC=DNE)",
+      y = "lnOR after adj. C, MC=DNE",
+      col = "lnOR C->X"
+      ) +
+  theme(
+     legend.position = "right",
+     axis.text.x = element_text(face = "bold"),
+     plot.caption = element_text(hjust = 0, size = 9, colour = "grey30") # move caption to the left
+     # plot.caption.position = "plot"
+     )
+
+```
+
+```{r}
+# save plot
+ggsave("C:/Users/tyler/OneDrive/PhD, Epi/2_Spring 2020/PUBH 7391 Quantitative Bias Analysis/Code/Simulations/Schlesselman_OR/lnOR_MC.DNE_vs_Schless_lnORs_2.png",
+        width = 40, height = 20, units = "cm")
+```
+
+```{r}
+C_adjusted <- ggplot(df_to_plot, aes(x=Est.of.True_X_Y_MC.adj_C.adj, y=lnOR_without_Bias_Schles)) +
+      geom_point() +
+      theme(legend.position="none")
+C_adjusted
+```
+
+
+
