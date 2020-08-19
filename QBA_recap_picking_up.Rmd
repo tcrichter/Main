@@ -1,0 +1,371 @@
+---
+title: "Specified_vs_observed"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Libraries
+```{r}
+library(boot)
+library(dplyr)
+```
+
+
+# Create dataset with only one set of fixed parameters
+```{r}
+# run this chunk entirely and not piecemeal
+
+set.seed(111)  # include set.seed() or the results won't be reproducible
+
+n = 10^6        # sample size
+trials = 1      # trial size
+intercept = -2  # baseline for exposure and for outcome
+se=0.7          # sensitivity (misclassified exposure)
+sp=0.9          # specificity (misclassified exposure)
+
+# confounder variable 
+C = rbinom(n, trials, 0.5)
+
+# exposure variable
+X = rbinom(n, trials, inv.logit(intercept + 0.2*C))
+
+# outcome variable
+Y = rbinom(n, trials, inv.logit(intercept + 1.5*C + 2*X))
+
+
+# must do this otherwise r interprets 0 weird
+p = as.character(X) # viewing will show 0.1 but sum(p==0.1) = 0
+
+p[X == "1"] = se
+p[X == "0"] = 1-sp
+p = as.numeric(p)
+
+# misclassification variable, X*=S for coding ease. "X*" created syntax poblems later on
+S = rbinom(n, trials, p)
+
+# dataframe makes it easier to run cross-tabs
+dset = data.frame(X, C, Y, S) # for the regression models
+
+# misclassification check
+#table(S,X)
+sum(dset$S==1 & dset$X==1)/sum(dset$X==1) # A/n1 should be roughly 0.7 | 0.6995017 good
+sum(dset$S==0 & dset$X==0)/sum(dset$X==0) # D/n2 should be roughly 0.9 | 0.9001538 good
+sum(dset$S==1 & dset$X==0)/sum(dset$X==0) # B/n2 should be roughly 0.1 | 0.09984621 good
+```
+
+# generalized linear models
+```{r}
+# MODELS WHERE MISCLASSIFICAITON DOES NOT EXIST:
+# Y->X+C  MC=DNE | C=Adjusted
+summary(glm(Y~X+C, family = binomial, data=dset)) 
+# intercept: -2.008271
+#         X:  2.003713
+#         C:  1.505544
+
+# Y->X    MC=DNE | C=Unadjusted
+summary(glm(Y~X, family = binomial, data=dset))   
+# intercept: -1.119542
+#         X:  1.837607
+
+    # bias due to confounding: 2.003713-1.837607 = 0.166106
+
+
+# MODELS WHERE MISCLASSIFICATION EXISTS AND IS UNADJUSTED (S=X*):
+# Y->X*+C MC=Unadjusted | C=Adjusted
+summary(glm(Y~S+C, family = binomial, data=dset))  
+# intercept: -1.832668
+#         S:  0.932317
+#         C:  1.414870
+
+# Y->X*+C MC=Unadjusted | C=Undjusted
+summary(glm(Y~S, family = binomial, data=dset))   
+# intercept: -1.012371
+#         S:  0.869318 
+  
+    # bias due to confounding: 0.932317-0.869318 = 0.062999
+
+
+# CHECK EFFECTS OF CONFOUNDER ON EXPOSURE: 
+# effect of C on X (MC DNE)
+summary(glm(X~C, family = binomial, data=dset))  
+# intercept: -1.998233
+#         C:  0.198238
+
+# effect of C on X* (MC unadjusted)
+summary(glm(S~C, family = binomial, data=dset)) 
+# intercept: -1.577825
+#         C:  0.096597 
+```
+
+# Tabular raw values
+```{r}
+# TRUE 2x2
+# cell A
+sum(dset$X==1 & dset$Y==1) # 87809
+# cell B
+sum(dset$X==1 & dset$Y==0) # 42824
+# cell C
+sum(dset$X==0 & dset$Y==1) # 213948
+# cell D
+sum(dset$X==0 & dset$Y==0) # 655419
+
+# TRUE 2x2 AMONG C=1
+# cell A
+sum(dset$X==1 & dset$Y==1 & dset$C==1) # 58175
+# cell B
+sum(dset$X==1 & dset$Y==0 & dset$C==1) # 12832
+# cell C
+sum(dset$X==0 & dset$Y==1 & dset$C==1) # 161792
+# cell D
+sum(dset$X==0 & dset$Y==0 & dset$C==1) # 267773
+
+# TRUE 2x2 AMONG C=0
+# cell A
+sum(dset$X==1 & dset$Y==1 & dset$C==0) # 29634
+# cell B
+sum(dset$X==1 & dset$Y==0 & dset$C==0) # 29992
+# cell C
+sum(dset$X==0 & dset$Y==1 & dset$C==0) # 52156
+# cell D
+sum(dset$X==0 & dset$Y==0 & dset$C==0) # 387646
+
+# MC UNADJUSTED 2x2
+# cell A
+sum(dset$S==1 & dset$Y==1) # 82729
+# cell B
+sum(dset$S==1 & dset$Y==0) # 95452
+# cell C
+sum(dset$S==0 & dset$Y==1) # 219028
+# cell D
+sum(dset$S==0 & dset$Y==0) # 602791
+
+# MC UNADJUSTED 2x2 AMONG C=1
+# cell A
+sum(dset$S==1 & dset$Y==1 & dset$C==1) # 56885
+# cell B
+sum(dset$S==1 & dset$Y==0 & dset$C==1) # 35842
+# cell C
+sum(dset$S==0 & dset$Y==1 & dset$C==1) # 163082
+# cell D
+sum(dset$S==0 & dset$Y==0 & dset$C==1) # 244763
+
+# MC UNADJUSTED 2x2 AMONG C=0
+# cell A
+sum(dset$S==1 & dset$Y==1 & dset$C==0) # 25844
+# cell B
+sum(dset$S==1 & dset$Y==0 & dset$C==0) # 59610
+# cell C
+sum(dset$S==0 & dset$Y==1 & dset$C==0) # 55946
+# cell D
+sum(dset$S==0 & dset$Y==0 & dset$C==0) # 358028
+
+# MC ADJUSTED 2x2
+a_temp = as.numeric(sum(dset$S==1 & dset$Y==1))
+b_temp = as.numeric(sum(dset$S==1 & dset$Y==0))
+c_temp = as.numeric(sum(dset$S==0 & dset$Y==1))
+d_temp = as.numeric(sum(dset$S==0 & dset$Y==0))
+N1 = as.numeric(a_temp+c_temp)
+N0 = as.numeric(b_temp+d_temp)
+        
+  # unadjusted log OR (matches glm)
+  log(((a_temp/b_temp))/((c_temp/d_temp))) # 0.8693177
+        
+  # create 2x2 of observed cells (exposure misclassification is adjusted)
+  A_temp = as.numeric((a_temp-(1-sp)*N1)/(se+sp-1))
+  B_temp = as.numeric((b_temp-(1-sp)*N0)/(se+sp-1))
+  C_temp = as.numeric(N1-A_temp)
+  D_temp = as.numeric(N0-B_temp)
+    
+    # adjusted log OR (matches glm)
+    log(((A_temp/B_temp))/((C_temp/D_temp))) # 1.836837
+```
+
+# checking some probabilities if desired
+```{r}
+# P(C=1)
+sum(dset$C==1)/n # 0.500572, log prob = -0.6920038; logit= 0.002288001
+
+# P(X=1)
+sum(dset$X==1)/n # 0.130633, log prob = -2.035363; logit= -1.895373
+
+# P(Y=1)
+sum(dset$Y==1)/n # 0.301757, log prob = -1.198133; logit= -0.8389451
+
+# P(X*=1) for S=X*
+sum(dset$S==1)/n # 0.178181, log prob = -1.724955 logit= -1.52872
+
+# JOINT PROBABILITIES
+# P(X=1,C=1)
+sum(dset$X==1 & dset$C==1)/n # 0.071007; logit= -2.571323
+# P(X=1,C=0)
+sum(dset$X==1 & dset$C==0)/n # 0.059626; logit= -2.758186
+# P(X=0,C=1)
+sum(dset$X==0 & dset$C==1)/n # 0.429656; logit= -0.2832548
+# P(X=0,C=0)
+sum(dset$X==0 & dset$C==0)/n # 0.439802; logit= -0.2419657
+
+# CONDITIONAL PROBABILITIES
+# P(X=1|C=1)
+sum(dset$X==1 & dset$C==1)/sum(dset$C==1) # 0.1418517; logit= -1.799995
+# P(X=0|C=1)
+sum(dset$X==0 & dset$C==1)/sum(dset$C==1) # 0.8581483; logit= 1.799995
+# P(Y=1|X=1,C=1)
+sum(dset$Y==1 & dset$X==1 & dset$C==1)/sum(dset$X==1 & dset$C==1)
+# P(Y=1|X=0,C=1)
+sum(dset$Y==1 & dset$X==0 & dset$C==1)/sum(dset$X==0 & dset$C==1)
+# P(Y=1|X=1,C=0)
+sum(dset$Y==1 & dset$X==1 & dset$C==0)/sum(dset$X==1 & dset$C==0)
+# P(Y=1|X=0,C=0)
+sum(dset$Y==1 & dset$X==0 & dset$C==0)/sum(dset$X==0 & dset$C==0)
+```
+
+# checking some Odds if desired
+```{r}
+# odds of X
+sum(dset$X==1)/sum(dset$X==0) # 0.1502622, log odds = -1.895374
+# odds of X=1|C=1
+sum(dset$X==1 & dset$C==1)/sum(dset$X==0 & dset$C==1) # 0.1652998; logodds=-1.799994
+# odds of X=1|C=0
+sum(dset$X==1 & dset$C==0)/sum(dset$X==0 & dset$C==0) # 0.1355746; logodds=-1.998233
+# odds of X=0|C=1
+sum(dset$X==0 & dset$C==1)/sum(dset$X==1 & dset$C==1) # 6.049615; logodds=1.799995
+# odds of X=0|C=0
+sum(dset$X==0 & dset$C==0)/sum(dset$X==1 & dset$C==0) # 7.376010; logodds=1.998233
+
+# odds of C=1
+sum(dset$C==1)/sum(dset$C==0) # 1.002291, log odds = 0.00228838
+# odds of C=0
+sum(dset$C==0)/sum(dset$C==1) # 0.9977146, log odds = -0.00228838; logit=6.078926
+# odds of C=1|X=1
+sum(dset$C==1 & dset$X==1)/sum(dset$C==0 & dset$X==1) # 1.190873
+
+# odds of Y
+sum(dset$Y==1)/sum(dset$Y==0) # 0.4321662, log odds = -0.838945
+# odds of Y|C=1
+sum(dset$Y==1 & dset$C==1)/sum(dset$Y==0 & dset$C==1) # 0.7839026
+```
+
+# Stratified Tables by C, (MC=DNE)
+```{r}
+# C=1
+# A
+sum(dset$X==1 & dset$Y==1 & dset$C==1)
+# B
+sum(dset$X==1 & dset$Y==0 & dset$C==1)
+# C
+sum(dset$X==0 & dset$Y==1 & dset$C==1)
+# D
+sum(dset$X==0 & dset$Y==0 & dset$C==1)
+
+# C=0
+# A
+sum(dset$X==1 & dset$Y==1 & dset$C==0)
+# B
+sum(dset$X==1 & dset$Y==0 & dset$C==0)
+# C
+sum(dset$X==0 & dset$Y==1 & dset$C==0)
+# D
+sum(dset$X==0 & dset$Y==0 & dset$C==0)
+```
+
+```{r}
+# CHECK THAT THE EFFECT OF C ON X IS 0.2 ON THE LOG SCALE
+
+# C=1 
+sum(dset$C==1) # 500572
+sum(dset$C==0) # 499428
+# X=1 
+sum(dset$X==1) # 130633
+sum(dset$X==0) # 869367
+# odds X=1 among C=1
+sum(dset$X==1 & dset$C==1)/sum(dset$X==0 & dset$C==1) # 0.1652998
+# odds X=1 among C=0
+sum(dset$X==1 & dset$C==0)/sum(dset$X==0 & dset$C==0) # 0.1355746
+
+# OR
+0.1652998/0.1355746 # 1.219253
+log(1.219253) # 0.1982384
+```
+
+```{r}
+# EXTRA THINKING
+
+# We see above that the odds of X=1 is greater among C=1 compared to C=0. So this is not EMM e.g. the effect of X on Y differs by the value of C. But using 0.2*C in the creation of X, we create a difference in proportions of X=1 by the value of C. This is needed for there to even be confounding. Otherwise, if C and X have no association we have no confounding - we would have two independent predictors of Y.
+
+# We can create the associations using no mention of C in the creation of X, and we will see no association between C and X.
+# However, it appears that observe that the calculations of bias due to confounding are now further apart, but we don't have confounding so this is really just differences in the effect of including C in the model or not and the difference between that difference when there is misclassification, i.e. when using X or S in our models.
+
+set.seed(111)  # include set.seed() or the results won't be reproducible
+
+n = 10^6        # sample size
+trials = 1      # trial size
+intercept = -2  # baseline for exposure and for outcome
+se=0.7          # sensitivity (misclassified exposure)
+sp=0.9          # specificity (misclassified exposure)
+# confounder variable 
+C = rbinom(n, trials, 0.5)
+# exposure variable
+X = rbinom(n, trials, inv.logit(intercept))
+# outcome variable
+Y = rbinom(n, trials, inv.logit(intercept + 1.5*C + 2*X))
+
+p = as.character(X) # viewing will show 0.1 but sum(p==0.1) = 0
+
+p[X == "1"] = se
+p[X == "0"] = 1-sp
+p = as.numeric(p)
+
+# misclassification variable, X*=S for coding ease. "X*" created syntax poblems later on
+S = rbinom(n, trials, p)
+
+# dataframe makes it easier to run cross-tabs
+dset = data.frame(X, C, Y, S) # for the regression models
+
+# correlation between X and C? No
+cor(X,C) # -0.0007170824
+
+# MODELS WHERE MISCLASSIFICAITON DOES NOT EXIST:
+# Y->X+C  MC=DNE | C=Adjusted
+summary(glm(Y~X+C, family = binomial, data=dset)) 
+# intercept: -2.007592
+#         X:  2.000943
+#         C:  1.504500
+
+# Y->X    MC=DNE | C=Unadjusted
+summary(glm(Y~X, family = binomial, data=dset))   
+# intercept: -1.110418
+#         X:  1.763334
+
+    # bias due to confounding: 2.007592-1.763334 = 0.244258
+
+
+# MODELS WHERE MISCLASSIFICATION EXISTS AND IS UNADJUSTED (S=X*):
+# Y->X*+C MC=Unadjusted | C=Adjusted
+summary(glm(Y~S+C, family = binomial, data=dset))  
+# intercept: -1.821398
+#         S:  0.889112
+#         C:  1.381276
+
+# Y->X*+C MC=Unadjusted | C=Undjusted
+summary(glm(Y~S, family = binomial, data=dset))   
+# intercept: -1.017004
+#         S:  0.803216 
+  
+    # bias due to confounding: 0.889112-0.803216 = 0.085896
+
+
+# CHECK EFFECTS OF CONFOUNDER ON EXPOSURE: 
+# effect of C on X (MC DNE)
+summary(glm(X~C, family = binomial, data=dset))  
+# intercept: -1.998233
+#         C: -0.004427
+
+# effect of C on X* (MC unadjusted)
+summary(glm(S~C, family = binomial, data=dset)) 
+# intercept: -1.577825
+#         C:  0.002031 
+```
+
